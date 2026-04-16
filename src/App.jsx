@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
+import * as XLSX from "xlsx";
 
 // ─── Comparison Logic ────────────────────────────────────────────────────────
 
@@ -103,13 +104,77 @@ function rowsToTsv(rows) {
   return rows.map((row) => row.join("\t")).join("\n");
 }
 
+/**
+ * Returns the 0-based index of the next empty row in a worksheet.
+ * Falls back to 0 if the sheet has no content yet.
+ * @param {Object} ws - SheetJS worksheet
+ * @returns {number}
+ */
+function getNextRow(ws) {
+  const ref = ws["!ref"];
+  if (!ref) return 0;
+  const range = XLSX.utils.decode_range(ref);
+  return range.e.r + 1; // one row below the last occupied row
+}
+
+/**
+ * Reads an existing .xlsx File, appends changedRows to the sheet named
+ * "Modified" (creates if absent) and addedRows to "Added" (creates if absent),
+ * then triggers a browser download of the updated workbook.
+ *
+ * @param {File}   file         - The uploaded .xlsx File object
+ * @param {Array}  changedRows  - Rows for the Modified sheet
+ * @param {Array}  addedRows    - Rows for the Added sheet
+ * @param {string} outputName   - Download filename
+ * @param {'PT'|'EN'} language  - Determines which sheets to write to
+ */
+async function appendRowsAndDownload(file, changedRows, addedRows, outputName, language) {
+  const buffer = await file.arrayBuffer();
+  // Pass the ArrayBuffer directly — most reliable way to preserve all existing
+  // sheet content (styles, tables, formatting) across the read/write cycle.
+  const wb = XLSX.read(buffer, { type: "buffer", cellStyles: true, cellDates: true, sheetStubs: true });
+
+  // PT → sheets 1 & 2 | EN → sheets 3 & 4
+  const modifiedSheetName = language === "EN" ? "Modified EN" : "Modified";
+  const addedSheetName    = language === "EN" ? "Added EN"    : "Added";
+
+  function appendToSheet(sheetName, rows) {
+    if (!rows.length) return; // nothing to write — leave existing sheet completely untouched
+
+    if (!wb.SheetNames.includes(sheetName)) {
+      // Sheet does not exist yet — create it
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    } else {
+      const ws = wb.Sheets[sheetName];
+      const startRow = getNextRow(ws);
+      XLSX.utils.sheet_add_aoa(ws, rows, { origin: { r: startRow, c: 0 } });
+    }
+  }
+
+  appendToSheet(modifiedSheetName, changedRows);
+  appendToSheet(addedSheetName, addedRows);
+
+  // Serialize and trigger download
+  const data = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+  const blob = new Blob([data], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = outputName;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 // ─── UI Logic ────────────────────────────────────────────────────────────────
 
 const styles = {
   container: {
     maxWidth: "960px",
     margin: "0 auto",
-    padding: "32px 24px",
+    padding: "32px 16px",
     fontFamily: "system-ui, sans-serif",
     color: "#1a1a1a",
   },
@@ -267,14 +332,18 @@ export default function App() {
   const [changedTableRows, setChangedTableRows] = useState([]);
   const [addedTableRows, setAddedTableRows] = useState([]);
   const [company, setCompany] = useState("BCP");
+  const [language, setLanguage] = useState("PT");
   const [error, setError] = useState("");
   const [oldError, setOldError] = useState("");
   const [newError, setNewError] = useState("");
   const [copySuccess, setCopySuccess] = useState(null); // 'changed' | 'added' | 'table-changed' | 'table-added' | null
   const [changedCount, setChangedCount] = useState(null);
   const [addedCount, setAddedCount] = useState(null);
+  const [excelFile, setExcelFile] = useState(null);
+  const [excelFileName, setExcelFileName] = useState("");
+  const fileInputRef = useRef(null);
 
-  const isCompareDisabled = oldInput.trim() === "" || newInput.trim() === "";
+  const isCompareDisabled = newInput.trim() === "";
 
   function validateJson(raw, setFieldError) {
     try {
@@ -297,19 +366,29 @@ export default function App() {
     setAddedCount(null);
     setCopySuccess(null);
 
-    const oldJson = validateJson(oldInput, setOldError);
-    const newJson = validateJson(newInput, setNewError);
+    // Old JSON is optional — if empty, all new resources are treated as added
+    let oldJson = { data: { resources: [] } };
+    if (oldInput.trim() !== "") {
+      const parsed = validateJson(oldInput, setOldError);
+      if (!parsed) {
+        setError("Invalid JSON input");
+        return;
+      }
+      if (!Array.isArray(parsed?.data?.resources)) {
+        setError('Expected structure: { "data": { "resources": [...] } }');
+        return;
+      }
+      oldJson = parsed;
+    } else {
+      setOldError("");
+    }
 
-    if (!oldJson || !newJson) {
+    const newJson = validateJson(newInput, setNewError);
+    if (!newJson) {
       setError("Invalid JSON input");
       return;
     }
-
-    // Validate expected structure
-    if (
-      !Array.isArray(oldJson?.data?.resources) ||
-      !Array.isArray(newJson?.data?.resources)
-    ) {
+    if (!Array.isArray(newJson?.data?.resources)) {
       setError('Expected structure: { "data": { "resources": [...] } }');
       return;
     }
@@ -342,6 +421,21 @@ export default function App() {
     });
   }
 
+  function handleFileChange(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setExcelFile(file);
+    setExcelFileName(file.name);
+    // Reset the input so the same file can be re-uploaded if needed
+    e.target.value = "";
+  }
+
+  async function handleExportToExcel() {
+    if (!excelFile) return;
+    const outputName = excelFile.name.replace(/\.xlsx$/i, "_export.xlsx");
+    await appendRowsAndDownload(excelFile, changedTableRows, addedTableRows, outputName, language);
+  }
+
   function handleOldChange(e) {
     setOldInput(e.target.value);
     setOldError("");
@@ -365,7 +459,7 @@ export default function App() {
       {/* Input textareas */}
       <div style={styles.grid}>
         <div>
-          <label style={styles.label}>Old JSON</label>
+          <label style={styles.label}>Old JSON <span style={{ fontWeight: 400, textTransform: "none", color: "#999" }}>(optional)</span></label>
           <textarea
             style={{
               ...styles.textarea,
@@ -404,6 +498,15 @@ export default function App() {
         >
           <option value="BCP">BCP</option>
           <option value="AB">AB</option>
+        </select>
+
+        <select
+          style={styles.select}
+          value={language}
+          onChange={(e) => setLanguage(e.target.value)}
+        >
+          <option value="PT">PT</option>
+          <option value="EN">EN</option>
         </select>
 
         <button
@@ -504,13 +607,65 @@ export default function App() {
           </div>
         </div>
       )}
+      {/* Excel Export — upload an existing .xlsx and append rows */}
+      {(changedTableRows.length > 0 || addedTableRows.length > 0) && (
+        <div
+          style={{
+            marginTop: "32px",
+            padding: "16px 20px",
+            backgroundColor: "#f8fafc",
+            border: "1px solid #e2e8f0",
+            borderRadius: "8px",
+          }}
+        >
+          <label style={{ ...styles.label, marginBottom: "12px" }}>
+            Export to Excel
+          </label>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx"
+              style={{ display: "none" }}
+              onChange={handleFileChange}
+            />
+            <button
+              style={styles.buttonSecondary}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {excelFileName ? excelFileName : "Upload .xlsx"}
+            </button>
+            {excelFile && (
+              <button
+                style={{
+                  ...styles.button,
+                  ...((changedTableRows.length === 0 && addedTableRows.length === 0) ? styles.buttonDisabled : {}),
+                }}
+                onClick={handleExportToExcel}
+                disabled={changedTableRows.length === 0 && addedTableRows.length === 0}
+              >
+                Export to Excel
+              </button>
+            )}
+          </div>
+          {excelFile && (
+            <p style={{ fontSize: "12px", color: "#888", marginTop: "8px", marginBottom: 0 }}>
+              {language === "PT"
+                ? <>Rows will be appended to sheets <strong>Modified</strong> (page 1) and <strong>Added</strong> (page 2) in <strong>{excelFileName}</strong>.</>  
+                : <>Rows will be appended to sheets <strong>Modified EN</strong> (page 3) and <strong>Added EN</strong> (page 4) in <strong>{excelFileName}</strong>.</> 
+              }{" "}Sheets will be created if they don't exist yet.
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Excel Tables */}
       {(changedTableRows.length > 0 || addedTableRows.length > 0) && (
         <div
           style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: "24px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "32px",
             marginTop: "32px",
           }}
         >
@@ -518,19 +673,30 @@ export default function App() {
           <div>
             <div style={{ ...styles.resultHeader, marginBottom: "12px" }}>
               <label style={styles.label}>Modified — Excel ({company})</label>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <div
+                style={{ display: "flex", alignItems: "center", gap: "8px" }}
+              >
                 <span style={{ fontSize: "12px", color: "#666" }}>
-                  {changedTableRows.length} {changedTableRows.length === 1 ? "row" : "rows"}
+                  {changedTableRows.length}{" "}
+                  {changedTableRows.length === 1 ? "row" : "rows"}
                 </span>
                 <button
                   style={styles.buttonSecondary}
                   onClick={() => handleCopyTable("table-changed")}
                 >
-                  {copySuccess === "table-changed" ? "Copied!" : "Copy for Excel"}
+                  {copySuccess === "table-changed"
+                    ? "Copied!"
+                    : "Copy for Excel"}
                 </button>
               </div>
             </div>
-            <div style={{ overflowX: "auto", border: "1px solid #e2e8f0", borderRadius: "6px" }}>
+            <div
+              style={{
+                overflowX: "auto",
+                border: "1px solid #e2e8f0",
+                borderRadius: "6px",
+              }}
+            >
               <table style={styles.table}>
                 <thead>
                   <tr>
@@ -558,9 +724,12 @@ export default function App() {
           <div>
             <div style={{ ...styles.resultHeader, marginBottom: "12px" }}>
               <label style={styles.label}>Added — Excel ({company})</label>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <div
+                style={{ display: "flex", alignItems: "center", gap: "8px" }}
+              >
                 <span style={{ fontSize: "12px", color: "#666" }}>
-                  {addedTableRows.length} {addedTableRows.length === 1 ? "row" : "rows"}
+                  {addedTableRows.length}{" "}
+                  {addedTableRows.length === 1 ? "row" : "rows"}
                 </span>
                 <button
                   style={styles.buttonSecondary}
@@ -570,7 +739,13 @@ export default function App() {
                 </button>
               </div>
             </div>
-            <div style={{ overflowX: "auto", border: "1px solid #e2e8f0", borderRadius: "6px" }}>
+            <div
+              style={{
+                overflowX: "auto",
+                border: "1px solid #e2e8f0",
+                borderRadius: "6px",
+              }}
+            >
               <table style={styles.table}>
                 <thead>
                   <tr>
