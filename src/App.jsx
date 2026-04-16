@@ -264,12 +264,13 @@ export default function App() {
   const [newInput, setNewInput] = useState("");
   const [changedResult, setChangedResult] = useState("");
   const [addedResult, setAddedResult] = useState("");
-  const [tableRows, setTableRows] = useState([]);
+  const [changedTableRows, setChangedTableRows] = useState([]);
+  const [addedTableRows, setAddedTableRows] = useState([]);
   const [company, setCompany] = useState("BCP");
   const [error, setError] = useState("");
   const [oldError, setOldError] = useState("");
   const [newError, setNewError] = useState("");
-  const [copySuccess, setCopySuccess] = useState(null); // 'changed' | 'added' | 'table' | null
+  const [copySuccess, setCopySuccess] = useState(null); // 'changed' | 'added' | 'table-changed' | 'table-added' | null
   const [changedCount, setChangedCount] = useState(null);
   const [addedCount, setAddedCount] = useState(null);
 
@@ -290,6 +291,8 @@ export default function App() {
     setError("");
     setChangedResult("");
     setAddedResult("");
+    setChangedTableRows([]);
+    setAddedTableRows([]);
     setChangedCount(null);
     setAddedCount(null);
     setCopySuccess(null);
@@ -317,8 +320,8 @@ export default function App() {
     setChangedResult(JSON.stringify(changed, null, 2));
     setAddedResult(JSON.stringify(added, null, 2));
 
-    const allResources = [...changed.data.resources, ...added.data.resources];
-    setTableRows(buildTableRows(allResources, company));
+    setChangedTableRows(buildTableRows(changed.data.resources, company));
+    setAddedTableRows(buildTableRows(added.data.resources, company));
   }
 
   function handleCopy(type) {
@@ -330,10 +333,11 @@ export default function App() {
     });
   }
 
-  function handleCopyTable() {
-    if (!tableRows.length) return;
-    navigator.clipboard.writeText(rowsToTsv(tableRows)).then(() => {
-      setCopySuccess("table");
+  function handleCopyTable(type) {
+    const rows = type === "table-changed" ? changedTableRows : addedTableRows;
+    if (!rows.length) return;
+    navigator.clipboard.writeText(rowsToTsv(rows)).then(() => {
+      setCopySuccess(type);
       setTimeout(() => setCopySuccess(null), 2000);
     });
   }
@@ -500,48 +504,94 @@ export default function App() {
           </div>
         </div>
       )}
-      {/* Excel Table */}
-      {tableRows.length > 0 && (
-        <div style={{ marginTop: "32px" }}>
-          <div style={{ ...styles.resultHeader, marginBottom: "12px" }}>
-            <label style={styles.label}>Excel Table — {company}</label>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span style={{ fontSize: "12px", color: "#666" }}>
-                {tableRows.length} {tableRows.length === 1 ? "row" : "rows"}
-              </span>
-              <button style={styles.buttonSecondary} onClick={handleCopyTable}>
-                {copySuccess === "table" ? "Copied!" : "Copy for Excel"}
-              </button>
+      {/* Excel Tables */}
+      {(changedTableRows.length > 0 || addedTableRows.length > 0) && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: "24px",
+            marginTop: "32px",
+          }}
+        >
+          {/* Modified table */}
+          <div>
+            <div style={{ ...styles.resultHeader, marginBottom: "12px" }}>
+              <label style={styles.label}>Modified — Excel ({company})</label>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{ fontSize: "12px", color: "#666" }}>
+                  {changedTableRows.length} {changedTableRows.length === 1 ? "row" : "rows"}
+                </span>
+                <button
+                  style={styles.buttonSecondary}
+                  onClick={() => handleCopyTable("table-changed")}
+                >
+                  {copySuccess === "table-changed" ? "Copied!" : "Copy for Excel"}
+                </button>
+              </div>
+            </div>
+            <div style={{ overflowX: "auto", border: "1px solid #e2e8f0", borderRadius: "6px" }}>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Company</th>
+                    <th style={styles.th}>keyGroup</th>
+                    <th style={styles.th}>key</th>
+                    <th style={styles.th}>value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {changedTableRows.map(([prefix, keyGroup, key, value], i) => (
+                    <tr key={i} style={i % 2 === 1 ? styles.trEven : {}}>
+                      <td style={styles.td}>{prefix}</td>
+                      <td style={styles.td}>{keyGroup}</td>
+                      <td style={styles.td}>{key}</td>
+                      <td style={styles.td}>{value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
 
-          <div
-            style={{
-              overflowX: "auto",
-              border: "1px solid #e2e8f0",
-              borderRadius: "6px",
-            }}
-          >
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>Company</th>
-                  <th style={styles.th}>keyGroup</th>
-                  <th style={styles.th}>key</th>
-                  <th style={styles.th}>value</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tableRows.map(([prefix, keyGroup, key, value], i) => (
-                  <tr key={i} style={i % 2 === 1 ? styles.trEven : {}}>
-                    <td style={styles.td}>{prefix}</td>
-                    <td style={styles.td}>{keyGroup}</td>
-                    <td style={styles.td}>{key}</td>
-                    <td style={styles.td}>{value}</td>
+          {/* Added table */}
+          <div>
+            <div style={{ ...styles.resultHeader, marginBottom: "12px" }}>
+              <label style={styles.label}>Added — Excel ({company})</label>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{ fontSize: "12px", color: "#666" }}>
+                  {addedTableRows.length} {addedTableRows.length === 1 ? "row" : "rows"}
+                </span>
+                <button
+                  style={styles.buttonSecondary}
+                  onClick={() => handleCopyTable("table-added")}
+                >
+                  {copySuccess === "table-added" ? "Copied!" : "Copy for Excel"}
+                </button>
+              </div>
+            </div>
+            <div style={{ overflowX: "auto", border: "1px solid #e2e8f0", borderRadius: "6px" }}>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Company</th>
+                    <th style={styles.th}>keyGroup</th>
+                    <th style={styles.th}>key</th>
+                    <th style={styles.th}>value</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {addedTableRows.map(([prefix, keyGroup, key, value], i) => (
+                    <tr key={i} style={i % 2 === 1 ? styles.trEven : {}}>
+                      <td style={styles.td}>{prefix}</td>
+                      <td style={styles.td}>{keyGroup}</td>
+                      <td style={styles.td}>{key}</td>
+                      <td style={styles.td}>{value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
