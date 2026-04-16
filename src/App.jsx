@@ -65,6 +65,44 @@ function compareResources(oldJson, newJson) {
   };
 }
 
+// ─── Table Logic ────────────────────────────────────────────────────────────
+
+const COMPANY_PREFIXES = {
+  AB: ["AB; ABWM; ABAPP"],
+  BCP: ["FEP; FEPWM; FEPAPP"],
+};
+
+/**
+ * Expands a list of resources into table rows.
+ * Each resource produces one row per company prefix.
+ * Row shape: [prefix, keyGroup, key, value]
+ *
+ * @param {Array} resources
+ * @param {'AB'|'BCP'} company
+ * @returns {Array<[string, string, string, string]>}
+ */
+function buildTableRows(resources, company) {
+  const prefixes = COMPANY_PREFIXES[company] ?? [];
+  return resources.flatMap((r) =>
+    prefixes.map((prefix) => [
+      prefix,
+      r.keyGroup ?? "",
+      r.key ?? "",
+      r.value ?? "",
+    ]),
+  );
+}
+
+/**
+ * Converts rows to TSV string (tab-separated values).
+ * Pastes directly into Excel as separate columns.
+ * @param {Array<string[]>} rows
+ * @returns {string}
+ */
+function rowsToTsv(rows) {
+  return rows.map((row) => row.join("\t")).join("\n");
+}
+
 // ─── UI Logic ────────────────────────────────────────────────────────────────
 
 const styles = {
@@ -181,6 +219,44 @@ const styles = {
     backgroundColor: "#dcfce7",
     color: "#166534",
   },
+  select: {
+    padding: "10px 12px",
+    fontSize: "14px",
+    fontWeight: "600",
+    border: "1px solid #d1d5db",
+    borderRadius: "6px",
+    backgroundColor: "#fff",
+    color: "#1a1a1a",
+    cursor: "pointer",
+    outline: "none",
+  },
+  table: {
+    width: "100%",
+    borderCollapse: "collapse",
+    fontSize: "13px",
+    fontFamily: "monospace",
+  },
+  th: {
+    textAlign: "left",
+    padding: "8px 12px",
+    backgroundColor: "#f1f5f9",
+    borderBottom: "2px solid #e2e8f0",
+    fontSize: "12px",
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+    color: "#475569",
+    fontFamily: "system-ui, sans-serif",
+  },
+  td: {
+    padding: "7px 12px",
+    borderBottom: "1px solid #e2e8f0",
+    verticalAlign: "top",
+    color: "#1a1a1a",
+  },
+  trEven: {
+    backgroundColor: "#f8fafc",
+  },
 };
 
 export default function App() {
@@ -188,10 +264,12 @@ export default function App() {
   const [newInput, setNewInput] = useState("");
   const [changedResult, setChangedResult] = useState("");
   const [addedResult, setAddedResult] = useState("");
+  const [tableRows, setTableRows] = useState([]);
+  const [company, setCompany] = useState("BCP");
   const [error, setError] = useState("");
   const [oldError, setOldError] = useState("");
   const [newError, setNewError] = useState("");
-  const [copySuccess, setCopySuccess] = useState(null); // 'changed' | 'added' | null
+  const [copySuccess, setCopySuccess] = useState(null); // 'changed' | 'added' | 'table' | null
   const [changedCount, setChangedCount] = useState(null);
   const [addedCount, setAddedCount] = useState(null);
 
@@ -238,6 +316,9 @@ export default function App() {
     setAddedCount(added.data.resources.length);
     setChangedResult(JSON.stringify(changed, null, 2));
     setAddedResult(JSON.stringify(added, null, 2));
+
+    const allResources = [...changed.data.resources, ...added.data.resources];
+    setTableRows(buildTableRows(allResources, company));
   }
 
   function handleCopy(type) {
@@ -245,6 +326,14 @@ export default function App() {
     if (!text) return;
     navigator.clipboard.writeText(text).then(() => {
       setCopySuccess(type);
+      setTimeout(() => setCopySuccess(null), 2000);
+    });
+  }
+
+  function handleCopyTable() {
+    if (!tableRows.length) return;
+    navigator.clipboard.writeText(rowsToTsv(tableRows)).then(() => {
+      setCopySuccess("table");
       setTimeout(() => setCopySuccess(null), 2000);
     });
   }
@@ -304,6 +393,15 @@ export default function App() {
 
       {/* Actions */}
       <div style={styles.actions}>
+        <select
+          style={styles.select}
+          value={company}
+          onChange={(e) => setCompany(e.target.value)}
+        >
+          <option value="BCP">BCP</option>
+          <option value="AB">AB</option>
+        </select>
+
         <button
           style={{
             ...styles.button,
@@ -399,6 +497,51 @@ export default function App() {
               readOnly
               spellCheck={false}
             />
+          </div>
+        </div>
+      )}
+      {/* Excel Table */}
+      {tableRows.length > 0 && (
+        <div style={{ marginTop: "32px" }}>
+          <div style={{ ...styles.resultHeader, marginBottom: "12px" }}>
+            <label style={styles.label}>Excel Table — {company}</label>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span style={{ fontSize: "12px", color: "#666" }}>
+                {tableRows.length} {tableRows.length === 1 ? "row" : "rows"}
+              </span>
+              <button style={styles.buttonSecondary} onClick={handleCopyTable}>
+                {copySuccess === "table" ? "Copied!" : "Copy for Excel"}
+              </button>
+            </div>
+          </div>
+
+          <div
+            style={{
+              overflowX: "auto",
+              border: "1px solid #e2e8f0",
+              borderRadius: "6px",
+            }}
+          >
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>Company</th>
+                  <th style={styles.th}>keyGroup</th>
+                  <th style={styles.th}>key</th>
+                  <th style={styles.th}>value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tableRows.map(([prefix, keyGroup, key, value], i) => (
+                  <tr key={i} style={i % 2 === 1 ? styles.trEven : {}}>
+                    <td style={styles.td}>{prefix}</td>
+                    <td style={styles.td}>{keyGroup}</td>
+                    <td style={styles.td}>{key}</td>
+                    <td style={styles.td}>{value}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
