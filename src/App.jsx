@@ -327,8 +327,6 @@ const styles = {
 export default function App() {
   const [oldInput, setOldInput] = useState("");
   const [newInput, setNewInput] = useState("");
-  const [changedResult, setChangedResult] = useState("");
-  const [addedResult, setAddedResult] = useState("");
   const [changedTableRows, setChangedTableRows] = useState([]);
   const [addedTableRows, setAddedTableRows] = useState([]);
   const [company, setCompany] = useState("BCP");
@@ -358,8 +356,6 @@ export default function App() {
 
   function handleCompare() {
     setError("");
-    setChangedResult("");
-    setAddedResult("");
     setChangedTableRows([]);
     setAddedTableRows([]);
     setChangedCount(null);
@@ -396,20 +392,9 @@ export default function App() {
     const { changed, added } = compareResources(oldJson, newJson);
     setChangedCount(changed.data.resources.length);
     setAddedCount(added.data.resources.length);
-    setChangedResult(JSON.stringify(changed, null, 2));
-    setAddedResult(JSON.stringify(added, null, 2));
 
     setChangedTableRows(buildTableRows(changed.data.resources, company));
     setAddedTableRows(buildTableRows(added.data.resources, company));
-  }
-
-  function handleCopy(type) {
-    const text = type === "changed" ? changedResult : addedResult;
-    if (!text) return;
-    navigator.clipboard.writeText(text).then(() => {
-      setCopySuccess(type);
-      setTimeout(() => setCopySuccess(null), 2000);
-    });
   }
 
   function handleCopyTable(type) {
@@ -534,79 +519,6 @@ export default function App() {
         </p>
       )}
 
-      {/* Results */}
-      {(changedResult || addedResult) && (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: "24px",
-          }}
-        >
-          {/* Modified resources */}
-          <div style={styles.resultSection}>
-            <div style={styles.resultHeader}>
-              <label style={styles.label}>Modified Resources</label>
-              <div
-                style={{ display: "flex", alignItems: "center", gap: "8px" }}
-              >
-                {changedCount !== null && (
-                  <span style={styles.badge}>
-                    {changedCount}{" "}
-                    {changedCount === 1 ? "resource" : "resources"}
-                  </span>
-                )}
-                <button
-                  style={styles.buttonSecondary}
-                  onClick={() => handleCopy("changed")}
-                >
-                  {copySuccess === "changed" ? "Copied!" : "Copy"}
-                </button>
-              </div>
-            </div>
-            <textarea
-              style={{ ...styles.textarea, ...styles.textareaReadonly }}
-              value={changedResult}
-              readOnly
-              spellCheck={false}
-            />
-          </div>
-
-          {/* Added resources */}
-          <div style={styles.resultSection}>
-            <div style={styles.resultHeader}>
-              <label style={styles.label}>Added Resources</label>
-              <div
-                style={{ display: "flex", alignItems: "center", gap: "8px" }}
-              >
-                {addedCount !== null && (
-                  <span
-                    style={{
-                      ...styles.badge,
-                      backgroundColor: "#dbeafe",
-                      color: "#1e40af",
-                    }}
-                  >
-                    {addedCount} {addedCount === 1 ? "resource" : "resources"}
-                  </span>
-                )}
-                <button
-                  style={styles.buttonSecondary}
-                  onClick={() => handleCopy("added")}
-                >
-                  {copySuccess === "added" ? "Copied!" : "Copy"}
-                </button>
-              </div>
-            </div>
-            <textarea
-              style={{ ...styles.textarea, ...styles.textareaReadonly }}
-              value={addedResult}
-              readOnly
-              spellCheck={false}
-            />
-          </div>
-        </div>
-      )}
       {/* Excel Export — upload an existing .xlsx and append rows */}
       {(changedTableRows.length > 0 || addedTableRows.length > 0) && (
         <div
