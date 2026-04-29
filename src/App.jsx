@@ -1,5 +1,12 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import * as XLSX from "xlsx";
+import { EXCEL_FILES } from "./excelFiles";
+import {
+  BUCKET,
+  supabase,
+  SUPABASE_ANON_KEY,
+  SUPABASE_URL,
+} from "./supabaseClient";
 
 // ─── Comparison Logic ────────────────────────────────────────────────────────
 
@@ -118,31 +125,64 @@ function getNextRow(ws) {
 }
 
 /**
- * Reads an existing .xlsx File, appends changedRows to the sheet named
- * "Modified" (creates if absent) and addedRows to "Added" (creates if absent),
- * then triggers a browser download of the updated workbook.
+ * Fetches an Excel file from Supabase Storage, appends changedRows to the
+ * "Modified" sheet and addedRows to the "Added" sheet (PT) or
+ * "Modified EN" / "Added EN" (EN), then re-uploads the file in place.
  *
- * @param {File}   file         - The uploaded .xlsx File object
- * @param {Array}  changedRows  - Rows for the Modified sheet
- * @param {Array}  addedRows    - Rows for the Added sheet
- * @param {string} outputName   - Download filename
- * @param {'PT'|'EN'} language  - Determines which sheets to write to
+ * @param {string}   fileName    - Filename in the bucket (e.g. "BCP_Cards.xlsx")
+ * @param {Array}    changedRows
+ * @param {Array}    addedRows
+ * @param {'PT'|'EN'} language
+ * @returns {Promise<{ error: string|null }>}
  */
-async function appendRowsAndDownload(file, changedRows, addedRows, outputName, language) {
-  const buffer = await file.arrayBuffer();
-  // Pass the ArrayBuffer directly — most reliable way to preserve all existing
-  // sheet content (styles, tables, formatting) across the read/write cycle.
-  const wb = XLSX.read(buffer, { type: "buffer", cellStyles: true, cellDates: true, sheetStubs: true });
+async function appendRowsToSupabase(
+  fileName,
+  changedRows,
+  addedRows,
+  language,
+) {
+  // 1. Download existing file using the authenticated storage endpoint.
+  const authDownloadUrl = `${SUPABASE_URL}/storage/v1/object/authenticated/${BUCKET}/${fileName}`;
+  console.log("[Export] Downloading from:", authDownloadUrl);
+
+  const response = await fetch(authDownloadUrl, {
+    headers: {
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      apikey: SUPABASE_ANON_KEY,
+      "Cache-Control": "no-cache, no-store",
+      Pragma: "no-cache",
+    },
+    cache: "no-store",
+  });
+
+  console.log(
+    "[Export] Download status:",
+    response.status,
+    response.statusText,
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    console.error("[Export] Download error body:", body);
+    return {
+      error: `Download failed: ${response.status} ${response.statusText} — ${body}`,
+    };
+  }
+
+  // 2. Read the workbook
+  const buffer = await response.arrayBuffer();
+  console.log("[Export] Downloaded buffer size (bytes):", buffer.byteLength);
+
+  const wb = XLSX.read(buffer, { type: "buffer" });
+  console.log("[Export] Sheets found in workbook:", wb.SheetNames);
 
   // PT → sheets 1 & 2 | EN → sheets 3 & 4
   const modifiedSheetName = language === "EN" ? "Modified EN" : "Modified";
-  const addedSheetName    = language === "EN" ? "Added EN"    : "Added";
+  const addedSheetName = language === "EN" ? "Added EN" : "Added";
 
   function appendToSheet(sheetName, rows) {
-    if (!rows.length) return; // nothing to write — leave existing sheet completely untouched
-
+    if (!rows.length) return;
     if (!wb.SheetNames.includes(sheetName)) {
-      // Sheet does not exist yet — create it
       const ws = XLSX.utils.aoa_to_sheet(rows);
       XLSX.utils.book_append_sheet(wb, ws, sheetName);
     } else {
@@ -155,17 +195,28 @@ async function appendRowsAndDownload(file, changedRows, addedRows, outputName, l
   appendToSheet(modifiedSheetName, changedRows);
   appendToSheet(addedSheetName, addedRows);
 
-  // Serialize and trigger download
+  // 3. Serialize and re-upload (upsert = overwrite in place)
   const data = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-  const blob = new Blob([data], {
+  console.log("[Export] Serialized workbook size (bytes):", data.byteLength);
+
+  const uploadBlob = new Blob([data], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = outputName;
-  anchor.click();
-  URL.revokeObjectURL(url);
+
+  const { error: uploadError } = await supabase.storage
+    .from(BUCKET)
+    .upload(fileName, uploadBlob, {
+      upsert: true,
+      contentType: uploadBlob.type,
+    });
+
+  if (uploadError) {
+    console.error("[Export] Upload error:", uploadError);
+    return { error: `Upload failed: ${uploadError.message}` };
+  }
+
+  console.log("[Export] Upload successful.");
+  return { error: null };
 }
 
 // ─── UI Logic ────────────────────────────────────────────────────────────────
@@ -322,9 +373,267 @@ const styles = {
   trEven: {
     backgroundColor: "#f8fafc",
   },
+  tabBar: {
+    display: "flex",
+    gap: "0",
+    borderBottom: "2px solid #e2e8f0",
+    marginBottom: "32px",
+  },
+  tab: {
+    padding: "10px 24px",
+    fontSize: "14px",
+    fontWeight: "600",
+    border: "none",
+    borderBottom: "2px solid transparent",
+    marginBottom: "-2px",
+    background: "none",
+    cursor: "pointer",
+    color: "#64748b",
+    transition: "color 0.15s, border-color 0.15s",
+  },
+  tabActive: {
+    color: "#2563eb",
+    borderBottomColor: "#2563eb",
+  },
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    backgroundColor: "rgba(0,0,0,0.4)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1000,
+  },
+  modalBox: {
+    backgroundColor: "#fff",
+    borderRadius: "10px",
+    padding: "28px 32px",
+    maxWidth: "400px",
+    width: "90%",
+    boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
+  },
+  modalTitle: {
+    fontSize: "16px",
+    fontWeight: "700",
+    marginBottom: "8px",
+    color: "#1a1a1a",
+  },
+  modalBody: {
+    fontSize: "14px",
+    color: "#64748b",
+    marginBottom: "24px",
+    lineHeight: "1.5",
+  },
+  modalActions: {
+    display: "flex",
+    gap: "10px",
+    justifyContent: "flex-end",
+  },
+  buttonDanger: {
+    padding: "9px 20px",
+    fontSize: "14px",
+    fontWeight: "600",
+    border: "none",
+    borderRadius: "6px",
+    cursor: "pointer",
+    backgroundColor: "#dc2626",
+    color: "#fff",
+  },
 };
 
+function ConfirmModal({ fileName, onConfirm, onCancel }) {
+  return (
+    <div style={styles.modalOverlay}>
+      <div style={styles.modalBox}>
+        <p style={styles.modalTitle}>Remover todo o conteúdo?</p>
+        <p style={styles.modalBody}>
+          Todas as folhas de <strong>{fileName}.xlsx</strong> serão esvaziadas.
+          Esta ação não pode ser revertida.
+        </p>
+        <div style={styles.modalActions}>
+          <button style={styles.buttonSecondary} onClick={onCancel}>
+            Cancelar
+          </button>
+          <button style={styles.buttonDanger} onClick={onConfirm}>
+            Sim, remover
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FilesScreen() {
+  const [downloading, setDownloading] = useState({}); // { [name]: bool }
+  const [resetting, setResetting] = useState({}); // { [name]: bool }
+  const [confirmReset, setConfirmReset] = useState(null); // name | null
+  const [errors, setErrors] = useState({}); // { [name]: string }
+
+  async function handleDownloadFile(name) {
+    const fileName = `${name}.xlsx`;
+    setDownloading((d) => ({ ...d, [name]: true }));
+    setErrors((e) => ({ ...e, [name]: null }));
+
+    const authDownloadUrl = `${SUPABASE_URL}/storage/v1/object/authenticated/${BUCKET}/${fileName}`;
+    const response = await fetch(authDownloadUrl, {
+      headers: {
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        apikey: SUPABASE_ANON_KEY,
+      },
+      cache: "no-store",
+    });
+
+    setDownloading((d) => ({ ...d, [name]: false }));
+
+    if (!response.ok) {
+      setErrors((e) => ({
+        ...e,
+        [name]: `Error ${response.status}: ${response.statusText}`,
+      }));
+      return;
+    }
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function handleResetFile(name) {
+    const fileName = `${name}.xlsx`;
+    setResetting((r) => ({ ...r, [name]: true }));
+    setErrors((e) => ({ ...e, [name]: null }));
+
+    const authDownloadUrl = `${SUPABASE_URL}/storage/v1/object/authenticated/${BUCKET}/${fileName}`;
+    const response = await fetch(authDownloadUrl, {
+      headers: {
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        apikey: SUPABASE_ANON_KEY,
+      },
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      setErrors((e) => ({
+        ...e,
+        [name]: `Reset failed: ${response.status} ${response.statusText}`,
+      }));
+      setResetting((r) => ({ ...r, [name]: false }));
+      return;
+    }
+
+    const buffer = await response.arrayBuffer();
+    const wb = XLSX.read(buffer, { type: "buffer" });
+
+    // Clear only the diff sheets — all other sheets (e.g. "Capa") are left untouched
+    const DIFF_SHEETS = ["Modified", "Added", "Modified EN", "Added EN"];
+    for (const sheetName of wb.SheetNames) {
+      if (DIFF_SHEETS.includes(sheetName)) {
+        wb.Sheets[sheetName] = XLSX.utils.aoa_to_sheet([]);
+      }
+    }
+
+    const data = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    const uploadBlob = new Blob([data], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+
+    const { error: uploadError } = await supabase.storage
+      .from(BUCKET)
+      .upload(fileName, uploadBlob, {
+        upsert: true,
+        contentType: uploadBlob.type,
+      });
+
+    setResetting((r) => ({ ...r, [name]: false }));
+
+    if (uploadError) {
+      setErrors((e) => ({
+        ...e,
+        [name]: `Reset failed: ${uploadError.message}`,
+      }));
+    }
+  }
+
+  return (
+    <div>
+      {confirmReset && (
+        <ConfirmModal
+          fileName={confirmReset}
+          onCancel={() => setConfirmReset(null)}
+          onConfirm={() => {
+            const name = confirmReset;
+            setConfirmReset(null);
+            handleResetFile(name);
+          }}
+        />
+      )}
+      <p style={{ ...styles.subheading, marginBottom: "24px" }}>
+        Download the latest version of each Excel file directly from Supabase
+        Storage.
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+        {EXCEL_FILES.map((name) => (
+          <div
+            key={name}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "14px 20px",
+              border: "1px solid #e2e8f0",
+              borderRadius: "8px",
+              backgroundColor: "#f8fafc",
+            }}
+          >
+            <span
+              style={{
+                fontSize: "14px",
+                fontWeight: "600",
+                fontFamily: "monospace",
+              }}
+            >
+              {name}.xlsx
+            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              {errors[name] && (
+                <span style={{ fontSize: "12px", color: "#dc2626" }}>
+                  {errors[name]}
+                </span>
+              )}
+              <button
+                style={{
+                  ...styles.buttonSecondary,
+                  ...(resetting[name] ? styles.buttonDisabled : {}),
+                }}
+                onClick={() => setConfirmReset(name)}
+                disabled={!!resetting[name] || !!downloading[name]}
+              >
+                {resetting[name] ? "Resetting…" : "Reset"}
+              </button>
+              <button
+                style={{
+                  ...styles.buttonSecondary,
+                  ...(downloading[name] ? styles.buttonDisabled : {}),
+                }}
+                onClick={() => handleDownloadFile(name)}
+                disabled={!!downloading[name] || !!resetting[name]}
+              >
+                {downloading[name] ? "Downloading…" : "Download latest"}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const [activeTab, setActiveTab] = useState("comparator");
   const [oldInput, setOldInput] = useState("");
   const [newInput, setNewInput] = useState("");
   const [changedTableRows, setChangedTableRows] = useState([]);
@@ -337,11 +646,15 @@ export default function App() {
   const [copySuccess, setCopySuccess] = useState(null); // 'changed' | 'added' | 'table-changed' | 'table-added' | null
   const [changedCount, setChangedCount] = useState(null);
   const [addedCount, setAddedCount] = useState(null);
-  const [excelFile, setExcelFile] = useState(null);
-  const [excelFileName, setExcelFileName] = useState("");
-  const fileInputRef = useRef(null);
+  const [selectedFile, setSelectedFile] = useState("");
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState(null); // { ok: bool, message: string } | null
 
   const isCompareDisabled = newInput.trim() === "";
+  const isExportDisabled =
+    !selectedFile ||
+    isUploading ||
+    (changedTableRows.length === 0 && addedTableRows.length === 0);
 
   function validateJson(raw, setFieldError) {
     try {
@@ -406,19 +719,54 @@ export default function App() {
     });
   }
 
-  function handleFileChange(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    setExcelFile(file);
-    setExcelFileName(file.name);
-    // Reset the input so the same file can be re-uploaded if needed
-    e.target.value = "";
+  async function handleDownload() {
+    if (!selectedFile) return;
+    const fileName = `${selectedFile}.xlsx`;
+    const authDownloadUrl = `${SUPABASE_URL}/storage/v1/object/authenticated/${BUCKET}/${fileName}`;
+    const response = await fetch(authDownloadUrl, {
+      headers: {
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        apikey: SUPABASE_ANON_KEY,
+      },
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      setUploadStatus({
+        ok: false,
+        message: `Download failed: ${response.status} ${response.statusText}`,
+      });
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   async function handleExportToExcel() {
-    if (!excelFile) return;
-    const outputName = excelFile.name.replace(/\.xlsx$/i, "_export.xlsx");
-    await appendRowsAndDownload(excelFile, changedTableRows, addedTableRows, outputName, language);
+    if (!selectedFile) return;
+    setIsUploading(true);
+    setUploadStatus(null);
+
+    const { error } = await appendRowsToSupabase(
+      `${selectedFile}.xlsx`,
+      changedTableRows,
+      addedTableRows,
+      language,
+    );
+
+    setIsUploading(false);
+    if (error) {
+      setUploadStatus({ ok: false, message: error });
+    } else {
+      setUploadStatus({
+        ok: true,
+        message: `${selectedFile}.xlsx updated successfully in Supabase.`,
+      });
+    }
   }
 
   function handleOldChange(e) {
@@ -436,251 +784,358 @@ export default function App() {
   return (
     <div style={styles.container}>
       <h1 style={styles.heading}>JSON Resource Comparator</h1>
-      <p style={styles.subheading}>
-        Paste two resource JSONs to generate a diff containing only added or
-        modified resources.
-      </p>
 
-      {/* Input textareas */}
-      <div style={styles.grid}>
-        <div>
-          <label style={styles.label}>Old JSON <span style={{ fontWeight: 400, textTransform: "none", color: "#999" }}>(optional)</span></label>
-          <textarea
-            style={{
-              ...styles.textarea,
-              ...(oldError ? styles.textareaError : {}),
-            }}
-            placeholder={'{\n  "data": {\n    "resources": [...]\n  }\n}'}
-            value={oldInput}
-            onChange={handleOldChange}
-            spellCheck={false}
-          />
-          {oldError && <p style={styles.errorText}>{oldError}</p>}
-        </div>
-
-        <div>
-          <label style={styles.label}>New JSON</label>
-          <textarea
-            style={{
-              ...styles.textarea,
-              ...(newError ? styles.textareaError : {}),
-            }}
-            placeholder={'{\n  "data": {\n    "resources": [...]\n  }\n}'}
-            value={newInput}
-            onChange={handleNewChange}
-            spellCheck={false}
-          />
-          {newError && <p style={styles.errorText}>{newError}</p>}
-        </div>
-      </div>
-
-      {/* Actions */}
-      <div style={styles.actions}>
-        <select
-          style={styles.select}
-          value={company}
-          onChange={(e) => setCompany(e.target.value)}
-        >
-          <option value="BCP">BCP</option>
-          <option value="AB">AB</option>
-        </select>
-
-        <select
-          style={styles.select}
-          value={language}
-          onChange={(e) => setLanguage(e.target.value)}
-        >
-          <option value="PT">PT</option>
-          <option value="EN">EN</option>
-        </select>
-
+      {/* Tab bar */}
+      <div style={styles.tabBar}>
         <button
           style={{
-            ...styles.button,
-            ...(isCompareDisabled ? styles.buttonDisabled : {}),
+            ...styles.tab,
+            ...(activeTab === "comparator" ? styles.tabActive : {}),
           }}
-          onClick={handleCompare}
-          disabled={isCompareDisabled}
+          onClick={() => setActiveTab("comparator")}
         >
-          Compare JSONs
+          Comparator
+        </button>
+        <button
+          style={{
+            ...styles.tab,
+            ...(activeTab === "files" ? styles.tabActive : {}),
+          }}
+          onClick={() => setActiveTab("files")}
+        >
+          Files
         </button>
       </div>
 
-      {/* Global error */}
-      {error && (
-        <p
-          style={{
-            ...styles.errorText,
-            fontSize: "14px",
-            marginBottom: "16px",
-          }}
-        >
-          {error}
-        </p>
-      )}
+      {activeTab === "files" && <FilesScreen />}
 
-      {/* Excel Export — upload an existing .xlsx and append rows */}
-      {(changedTableRows.length > 0 || addedTableRows.length > 0) && (
-        <div
-          style={{
-            marginTop: "32px",
-            padding: "16px 20px",
-            backgroundColor: "#f8fafc",
-            border: "1px solid #e2e8f0",
-            borderRadius: "8px",
-          }}
-        >
-          <label style={{ ...styles.label, marginBottom: "12px" }}>
-            Export to Excel
-          </label>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx"
-              style={{ display: "none" }}
-              onChange={handleFileChange}
-            />
-            <button
-              style={styles.buttonSecondary}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              {excelFileName ? excelFileName : "Upload .xlsx"}
-            </button>
-            {excelFile && (
-              <button
+      {activeTab === "comparator" && (
+        <>
+          <p style={styles.subheading}>
+            Paste two resource JSONs to generate a diff containing only added or
+            modified resources.
+          </p>
+
+          {/* Input textareas */}
+          <div style={styles.grid}>
+            <div>
+              <label style={styles.label}>
+                Old JSON{" "}
+                <span
+                  style={{
+                    fontWeight: 400,
+                    textTransform: "none",
+                    color: "#999",
+                  }}
+                >
+                  (optional)
+                </span>
+              </label>
+              <textarea
                 style={{
-                  ...styles.button,
-                  ...((changedTableRows.length === 0 && addedTableRows.length === 0) ? styles.buttonDisabled : {}),
+                  ...styles.textarea,
+                  ...(oldError ? styles.textareaError : {}),
                 }}
-                onClick={handleExportToExcel}
-                disabled={changedTableRows.length === 0 && addedTableRows.length === 0}
-              >
-                Export to Excel
-              </button>
-            )}
+                placeholder={'{\n  "data": {\n    "resources": [...]\n  }\n}'}
+                value={oldInput}
+                onChange={handleOldChange}
+                spellCheck={false}
+              />
+              {oldError && <p style={styles.errorText}>{oldError}</p>}
+            </div>
+
+            <div>
+              <label style={styles.label}>New JSON</label>
+              <textarea
+                style={{
+                  ...styles.textarea,
+                  ...(newError ? styles.textareaError : {}),
+                }}
+                placeholder={'{\n  "data": {\n    "resources": [...]\n  }\n}'}
+                value={newInput}
+                onChange={handleNewChange}
+                spellCheck={false}
+              />
+              {newError && <p style={styles.errorText}>{newError}</p>}
+            </div>
           </div>
-          {excelFile && (
-            <p style={{ fontSize: "12px", color: "#888", marginTop: "8px", marginBottom: 0 }}>
-              {language === "PT"
-                ? <>Rows will be appended to sheets <strong>Modified</strong> (page 1) and <strong>Added</strong> (page 2) in <strong>{excelFileName}</strong>.</>  
-                : <>Rows will be appended to sheets <strong>Modified EN</strong> (page 3) and <strong>Added EN</strong> (page 4) in <strong>{excelFileName}</strong>.</> 
-              }{" "}Sheets will be created if they don't exist yet.
+
+          {/* Actions */}
+          <div style={styles.actions}>
+            <select
+              style={styles.select}
+              value={company}
+              onChange={(e) => setCompany(e.target.value)}
+            >
+              <option value="BCP">BCP</option>
+              <option value="AB">AB</option>
+            </select>
+
+            <select
+              style={styles.select}
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+            >
+              <option value="PT">PT</option>
+              <option value="EN">EN</option>
+            </select>
+
+            <button
+              style={{
+                ...styles.button,
+                ...(isCompareDisabled ? styles.buttonDisabled : {}),
+              }}
+              onClick={handleCompare}
+              disabled={isCompareDisabled}
+            >
+              Compare JSONs
+            </button>
+          </div>
+
+          {/* Global error */}
+          {error && (
+            <p
+              style={{
+                ...styles.errorText,
+                fontSize: "14px",
+                marginBottom: "16px",
+              }}
+            >
+              {error}
             </p>
           )}
-        </div>
-      )}
 
-      {/* Excel Tables */}
-      {(changedTableRows.length > 0 || addedTableRows.length > 0) && (
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: "32px",
-            marginTop: "32px",
-          }}
-        >
-          {/* Modified table */}
-          <div>
-            <div style={{ ...styles.resultHeader, marginBottom: "12px" }}>
-              <label style={styles.label}>Modified — Excel ({company})</label>
-              <div
-                style={{ display: "flex", alignItems: "center", gap: "8px" }}
-              >
-                <span style={{ fontSize: "12px", color: "#666" }}>
-                  {changedTableRows.length}{" "}
-                  {changedTableRows.length === 1 ? "row" : "rows"}
-                </span>
-                <button
-                  style={styles.buttonSecondary}
-                  onClick={() => handleCopyTable("table-changed")}
-                >
-                  {copySuccess === "table-changed"
-                    ? "Copied!"
-                    : "Copy for Excel"}
-                </button>
-              </div>
-            </div>
+          {/* Excel Export — select a Supabase file and append rows */}
+          {(changedTableRows.length > 0 || addedTableRows.length > 0) && (
             <div
               style={{
-                overflowX: "auto",
+                marginTop: "32px",
+                padding: "16px 20px",
+                backgroundColor: "#f8fafc",
                 border: "1px solid #e2e8f0",
-                borderRadius: "6px",
+                borderRadius: "8px",
               }}
             >
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Company</th>
-                    <th style={styles.th}>keyGroup</th>
-                    <th style={styles.th}>key</th>
-                    <th style={styles.th}>value</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {changedTableRows.map(([prefix, keyGroup, key, value], i) => (
-                    <tr key={i} style={i % 2 === 1 ? styles.trEven : {}}>
-                      <td style={styles.td}>{prefix}</td>
-                      <td style={styles.td}>{keyGroup}</td>
-                      <td style={styles.td}>{key}</td>
-                      <td style={styles.td}>{value}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Added table */}
-          <div>
-            <div style={{ ...styles.resultHeader, marginBottom: "12px" }}>
-              <label style={styles.label}>Added — Excel ({company})</label>
+              <label style={{ ...styles.label, marginBottom: "12px" }}>
+                Export to Supabase Excel
+              </label>
               <div
-                style={{ display: "flex", alignItems: "center", gap: "8px" }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  flexWrap: "wrap",
+                }}
               >
-                <span style={{ fontSize: "12px", color: "#666" }}>
-                  {addedTableRows.length}{" "}
-                  {addedTableRows.length === 1 ? "row" : "rows"}
-                </span>
-                <button
-                  style={styles.buttonSecondary}
-                  onClick={() => handleCopyTable("table-added")}
+                <select
+                  style={{ ...styles.select, minWidth: "220px" }}
+                  value={selectedFile}
+                  onChange={(e) => {
+                    setSelectedFile(e.target.value);
+                    setUploadStatus(null);
+                  }}
                 >
-                  {copySuccess === "table-added" ? "Copied!" : "Copy for Excel"}
+                  <option value="">— Select a file —</option>
+                  {EXCEL_FILES.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  style={{
+                    ...styles.button,
+                    ...(isExportDisabled ? styles.buttonDisabled : {}),
+                  }}
+                  onClick={handleExportToExcel}
+                  disabled={isExportDisabled}
+                >
+                  {isUploading ? "Uploading…" : "Export to Excel"}
+                </button>
+
+                <button
+                  style={{
+                    ...styles.buttonSecondary,
+                    ...(!selectedFile ? styles.buttonDisabled : {}),
+                  }}
+                  onClick={handleDownload}
+                  disabled={!selectedFile}
+                >
+                  Download latest
                 </button>
               </div>
+
+              {selectedFile && (
+                <p
+                  style={{
+                    fontSize: "12px",
+                    color: "#888",
+                    marginTop: "8px",
+                    marginBottom: 0,
+                  }}
+                >
+                  {language === "PT" ? (
+                    <>
+                      Rows will be appended to sheets <strong>Modified</strong>{" "}
+                      and <strong>Added</strong> in{" "}
+                      <strong>{selectedFile}.xlsx</strong>.
+                    </>
+                  ) : (
+                    <>
+                      Rows will be appended to sheets{" "}
+                      <strong>Modified EN</strong> and <strong>Added EN</strong>{" "}
+                      in <strong>{selectedFile}.xlsx</strong>.
+                    </>
+                  )}{" "}
+                  Sheets will be created if they don't exist yet.
+                </p>
+              )}
+
+              {uploadStatus && (
+                <p
+                  style={{
+                    fontSize: "13px",
+                    marginTop: "10px",
+                    marginBottom: 0,
+                    fontWeight: "600",
+                    color: uploadStatus.ok ? "#16a34a" : "#dc2626",
+                  }}
+                >
+                  {uploadStatus.message}
+                </p>
+              )}
             </div>
+          )}
+
+          {/* Excel Tables */}
+          {(changedTableRows.length > 0 || addedTableRows.length > 0) && (
             <div
               style={{
-                overflowX: "auto",
-                border: "1px solid #e2e8f0",
-                borderRadius: "6px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "32px",
+                marginTop: "32px",
               }}
             >
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Company</th>
-                    <th style={styles.th}>keyGroup</th>
-                    <th style={styles.th}>key</th>
-                    <th style={styles.th}>value</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {addedTableRows.map(([prefix, keyGroup, key, value], i) => (
-                    <tr key={i} style={i % 2 === 1 ? styles.trEven : {}}>
-                      <td style={styles.td}>{prefix}</td>
-                      <td style={styles.td}>{keyGroup}</td>
-                      <td style={styles.td}>{key}</td>
-                      <td style={styles.td}>{value}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              {/* Modified table */}
+              <div>
+                <div style={{ ...styles.resultHeader, marginBottom: "12px" }}>
+                  <label style={styles.label}>
+                    Modified — Excel ({company})
+                  </label>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                    }}
+                  >
+                    <span style={{ fontSize: "12px", color: "#666" }}>
+                      {changedTableRows.length}{" "}
+                      {changedTableRows.length === 1 ? "row" : "rows"}
+                    </span>
+                    <button
+                      style={styles.buttonSecondary}
+                      onClick={() => handleCopyTable("table-changed")}
+                    >
+                      {copySuccess === "table-changed"
+                        ? "Copied!"
+                        : "Copy for Excel"}
+                    </button>
+                  </div>
+                </div>
+                <div
+                  style={{
+                    overflowX: "auto",
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "6px",
+                  }}
+                >
+                  <table style={styles.table}>
+                    <thead>
+                      <tr>
+                        <th style={styles.th}>Company</th>
+                        <th style={styles.th}>keyGroup</th>
+                        <th style={styles.th}>key</th>
+                        <th style={styles.th}>value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {changedTableRows.map(
+                        ([prefix, keyGroup, key, value], i) => (
+                          <tr key={i} style={i % 2 === 1 ? styles.trEven : {}}>
+                            <td style={styles.td}>{prefix}</td>
+                            <td style={styles.td}>{keyGroup}</td>
+                            <td style={styles.td}>{key}</td>
+                            <td style={styles.td}>{value}</td>
+                          </tr>
+                        ),
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Added table */}
+              <div>
+                <div style={{ ...styles.resultHeader, marginBottom: "12px" }}>
+                  <label style={styles.label}>Added — Excel ({company})</label>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                    }}
+                  >
+                    <span style={{ fontSize: "12px", color: "#666" }}>
+                      {addedTableRows.length}{" "}
+                      {addedTableRows.length === 1 ? "row" : "rows"}
+                    </span>
+                    <button
+                      style={styles.buttonSecondary}
+                      onClick={() => handleCopyTable("table-added")}
+                    >
+                      {copySuccess === "table-added"
+                        ? "Copied!"
+                        : "Copy for Excel"}
+                    </button>
+                  </div>
+                </div>
+                <div
+                  style={{
+                    overflowX: "auto",
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "6px",
+                  }}
+                >
+                  <table style={styles.table}>
+                    <thead>
+                      <tr>
+                        <th style={styles.th}>Company</th>
+                        <th style={styles.th}>keyGroup</th>
+                        <th style={styles.th}>key</th>
+                        <th style={styles.th}>value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {addedTableRows.map(
+                        ([prefix, keyGroup, key, value], i) => (
+                          <tr key={i} style={i % 2 === 1 ? styles.trEven : {}}>
+                            <td style={styles.td}>{prefix}</td>
+                            <td style={styles.td}>{keyGroup}</td>
+                            <td style={styles.td}>{key}</td>
+                            <td style={styles.td}>{value}</td>
+                          </tr>
+                        ),
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
+          )}
+        </>
       )}
     </div>
   );
