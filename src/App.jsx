@@ -632,6 +632,160 @@ function FilesScreen() {
   );
 }
 
+function UrlToolScreen() {
+  const [input, setInput] = useState("");
+  const [output, setOutput] = useState("");
+  const [error, setError] = useState("");
+  const [mode, setMode] = useState("decode"); // 'decode' | 'encode'
+  const [copyDone, setCopyDone] = useState(false);
+
+  function handleConvert() {
+    setError("");
+    setOutput("");
+    const raw = input.trim();
+    if (!raw) return;
+
+    if (mode === "decode") {
+      try {
+        const decoded = decodeURIComponent(raw);
+        try {
+          const parsed = JSON.parse(decoded);
+          setOutput(JSON.stringify(parsed, null, 2));
+        } catch {
+          // Not JSON — just show the decoded string as-is
+          setOutput(decoded);
+        }
+      } catch {
+        setError("Invalid URL-encoded string.");
+      }
+    } else {
+      // encode mode: accept raw string or pretty JSON
+      try {
+        // Try to re-minify if it's valid JSON
+        const minified = JSON.stringify(JSON.parse(raw));
+        setOutput(encodeURIComponent(minified));
+      } catch {
+        // Not JSON — encode as-is
+        setOutput(encodeURIComponent(raw));
+      }
+    }
+  }
+
+  function handleCopy() {
+    if (!output) return;
+    navigator.clipboard.writeText(output).then(() => {
+      setCopyDone(true);
+      setTimeout(() => setCopyDone(false), 2000);
+    });
+  }
+
+  function handleClear() {
+    setInput("");
+    setOutput("");
+    setError("");
+  }
+
+  return (
+    <div>
+      <p style={{ ...styles.subheading, marginBottom: "24px" }}>
+        Decode a URL-encoded string (e.g. query params) into readable JSON, or
+        encode JSON back.
+      </p>
+
+      {/* Mode toggle */}
+      <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+        {["decode", "encode"].map((m) => (
+          <button
+            key={m}
+            style={{
+              ...styles.buttonSecondary,
+              ...(mode === m
+                ? {
+                    backgroundColor: "#2563eb",
+                    color: "#fff",
+                    borderColor: "#2563eb",
+                  }
+                : {}),
+            }}
+            onClick={() => {
+              setMode(m);
+              setOutput("");
+              setError("");
+            }}
+          >
+            {m === "decode" ? "Decode" : "Encode"}
+          </button>
+        ))}
+      </div>
+
+      {/* Input */}
+      <div style={{ marginBottom: "12px" }}>
+        <label style={styles.label}>
+          {mode === "decode" ? "URL-encoded input" : "JSON / plain text input"}
+        </label>
+        <textarea
+          style={{
+            ...styles.textarea,
+            minHeight: "160px",
+            ...(error ? styles.textareaError : {}),
+          }}
+          value={input}
+          onChange={(e) => {
+            setInput(e.target.value);
+            setError("");
+          }}
+          placeholder={
+            mode === "decode"
+              ? "%7B%22key%22%3A%22value%22%7D"
+              : '{"key": "value"}'
+          }
+          spellCheck={false}
+        />
+        {error && <p style={styles.errorText}>{error}</p>}
+      </div>
+
+      {/* Actions */}
+      <div style={{ display: "flex", gap: "10px", marginBottom: "20px" }}>
+        <button style={styles.button} onClick={handleConvert}>
+          {mode === "decode" ? "Decode" : "Encode"}
+        </button>
+        <button style={styles.buttonSecondary} onClick={handleClear}>
+          Clear
+        </button>
+      </div>
+
+      {/* Output */}
+      {output && (
+        <div>
+          <div style={{ ...styles.resultHeader, marginBottom: "8px" }}>
+            <label style={styles.label}>Output</label>
+            <button style={styles.buttonSecondary} onClick={handleCopy}>
+              {copyDone ? "Copied!" : "Copy"}
+            </button>
+          </div>
+          <pre
+            style={{
+              backgroundColor: "#f8fafc",
+              border: "1px solid #e2e8f0",
+              borderRadius: "6px",
+              padding: "16px",
+              fontSize: "13px",
+              fontFamily: "monospace",
+              overflowX: "auto",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+              margin: 0,
+              color: "#1a1a1a",
+            }}
+          >
+            {output}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState("comparator");
   const [oldInput, setOldInput] = useState("");
@@ -805,9 +959,19 @@ export default function App() {
         >
           Files
         </button>
+        <button
+          style={{
+            ...styles.tab,
+            ...(activeTab === "url" ? styles.tabActive : {}),
+          }}
+          onClick={() => setActiveTab("url")}
+        >
+          URL Tool
+        </button>
       </div>
 
       {activeTab === "files" && <FilesScreen />}
+      {activeTab === "url" && <UrlToolScreen />}
 
       {activeTab === "comparator" && (
         <>
